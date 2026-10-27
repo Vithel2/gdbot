@@ -206,7 +206,19 @@ class Viewer(tk.Tk):
             text += ' | obstacle: YES' if obstacle else ' | obstacle: no'
             draw.rectangle((0, h-30, min(w, 450), h), fill='black')
             draw.text((5, h-25), text, fill='white')
-            if self.writer is not None and time.monotonic() - self.last_write >= .1:
+            game_active = True
+            if sys.platform == 'win32':
+                import ctypes
+                get_foreground = ctypes.windll.user32.GetForegroundWindow
+                get_foreground.restype = ctypes.c_void_p
+                game_active = get_foreground() == self.hwnd
+            if self.writer is not None and not game_active:
+                if self.record_frames:
+                    self.stop_record()
+                    self.message.set('Запись сохранена: игра потеряла фокус. Начните новую запись клавишей Z.')
+                else:
+                    self.message.set('Ожидание игры: вернитесь в окно Geometry Dash и снимите паузу.')
+            if self.writer is not None and game_active and time.monotonic() - self.last_write >= .1:
                 import cv2
                 import numpy as np
                 self.writer.write(cv2.cvtColor(np.array(frame.resize(self.record_size)), cv2.COLOR_RGB2BGR))
