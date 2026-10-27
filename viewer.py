@@ -1,5 +1,8 @@
 """Live diagnostic view and recording of the selected game window (Windows)."""
 import sys
+import os
+import shutil
+import tempfile
 import time
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -20,6 +23,8 @@ class Viewer(tk.Tk):
         self.record_size = None
         self.last_write = 0
         self.record_path = None
+        self.temp_path = None
+        self.record_frames = 0
         top = ttk.Frame(self, padding=10)
         top.pack(fill='x')
         self.choose = ttk.Combobox(top, state='readonly', width=55)
@@ -48,6 +53,9 @@ class Viewer(tk.Tk):
 
     def start(self):
         i = self.choose.current()
+        if self.writer is not None:
+            messagebox.showerror('Просмотр', 'Сначала остановите запись.')
+            return
         if i < 0:
             messagebox.showerror('Окно', 'Выберите окно игры.')
             return
@@ -75,11 +83,27 @@ class Viewer(tk.Tk):
             w, h = frame.size
             # Codec dimensions should be even.
             size = (w - w % 2, h - h % 2)
-            writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*'mp4v'), 10, size)
+            if w < 300 or h < 150:
+                raise RuntimeError('Окно игры слишком маленькое или свёрнуто. Разверните его и повторите.')
+            # OpenCV on Windows can fail when a filename contains non-ASCII
+            # characters. Write to a temporary file, then move with Python.
+            handle, temp_path = tempfile.mkstemp(prefix='gd_record_', suffix='.mp4')
+            os.close(handle)
+            codec_path = temp_path
+            if sys.platform == 'win32':
+                import ctypes
+                kernel = ctypes.windll.kernel32
+                buf = ctypes.create_unicode_buffer(32768)
+                if kernel.GetShortPathNameW(temp_path, buf, len(buf)):
+                    codec_path = buf.value
+            writer = cv2.VideoWriter(codec_path, cv2.VideoWriter_fourcc(*'mp4v'), 10, size)
             if not writer.isOpened():
                 writer.release()
-                raise RuntimeError('Не удалось открыть MP4-кодировщик.')
+                os.unlink(temp_path)
+                raise RuntimeError('Не удалось запустить MP4-кодировщик. Проверьте установку OpenCV и доступ к временной папке.')
             self.writer, self.record_size, self.record_path = writer, size, path
+            self.temp_path = temp_path
+            self.record_frames = 0
             self.last_write = 0
         except Exception as exc:
             messagebox.showerror('Запись', str(exc))
@@ -88,7 +112,15 @@ class Viewer(tk.Tk):
         if self.writer is not None:
             self.writer.release()
             self.writer = None
-            self.status.set('Запись сохранена: ' + self.record_path)
+            try:
+                if self.record_frames == 0:
+                    os.unlink(self.temp_path)
+                    raise RuntimeError('Нет кадров: убедитесь, что игра развёрнута и видна в просмотре.')
+                shutil.move(self.temp_path, self.record_path)
+                self.status.set(f'Запись сохранена ({self.record_frames} кадров): {self.record_path}')
+            except (OSError, RuntimeError) as exc:
+                messagebox.showerror('Запись', f'{exc}\nВременный файл: {self.temp_path}')
+                self.status.set('Не удалось сохранить запись.')
 
     def tick(self):
         if not self.running:
@@ -110,6 +142,7 @@ class Viewer(tk.Tk):
                 import numpy as np
                 self.writer.write(cv2.cvtColor(np.array(frame.resize(self.record_size)), cv2.COLOR_RGB2BGR))
                 self.last_write = time.monotonic()
+                self.record_frames += 1
             display = frame.copy()
             display.thumbnail((max(1, self.label.winfo_width()), max(1, self.label.winfo_height())), Image.Resampling.LANCZOS)
             self.photo = ImageTk.PhotoImage(display)
