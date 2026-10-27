@@ -8,6 +8,7 @@ import time
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 from pathlib import Path
+from vision import progress_percent
 
 if sys.platform == 'win32':
     import ctypes
@@ -19,6 +20,8 @@ if sys.platform == 'win32':
     user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
     user32.SetForegroundWindow.argtypes = [wintypes.HWND]
     user32.GetForegroundWindow.restype = wintypes.HWND
+    user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    user32.ClientToScreen.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
     user32.keybd_event.argtypes = [wintypes.BYTE, wintypes.BYTE, wintypes.DWORD, ctypes.c_size_t]
 
 DATA = Path(os.getenv('LOCALAPPDATA', str(Path.home()))) / 'GDTrainer' / 'profiles.json'
@@ -58,6 +61,15 @@ def mutate(best, duration):
     return sorted(candidate)
 
 
+def capture_client(hwnd):
+    from PIL import ImageGrab
+    rect = wintypes.RECT()
+    point = wintypes.POINT(0, 0)
+    if not user32.GetClientRect(hwnd, ctypes.byref(rect)) or not user32.ClientToScreen(hwnd, ctypes.byref(point)):
+        raise RuntimeError('Не удалось определить область окна игры.')
+    return ImageGrab.grab(bbox=(point.x, point.y, point.x + rect.right, point.y + rect.bottom), all_screens=True)
+
+
 def play(hwnd, sequence, duration, cancelled):
     if not user32.IsWindow(hwnd) or not user32.SetForegroundWindow(hwnd):
         raise RuntimeError('Не удалось активировать выбранное окно. Откройте игру и выберите её заново.')
@@ -65,18 +77,32 @@ def play(hwnd, sequence, duration, cancelled):
     if user32.GetForegroundWindow() != hwnd:
         raise RuntimeError('Окно игры не получило фокус. Попробуйте ещё раз.')
     start = time.monotonic()
-    for moment in sequence:
-        if cancelled.wait(max(0, start + moment - time.monotonic())):
-            return False
+    next_capture = start
+    peak = None
+    index = 0
+    while time.monotonic() - start < duration:
+        if cancelled.wait(.01):
+            return False, None, False
         if user32.GetForegroundWindow() != hwnd:
             raise RuntimeError('Окно игры потеряло фокус; попытка остановлена.')
-        user32.keybd_event(0x20, 0, 0, 0)
-        try:
-            if cancelled.wait(.05):
-                return False
-        finally:
-            user32.keybd_event(0x20, 0, 2, 0)
-    return not cancelled.wait(max(0, start + duration - time.monotonic()))
+        now = time.monotonic()
+        if now >= next_capture:
+            value = progress_percent(capture_client(hwnd))
+            next_capture = time.monotonic() + .08
+            if value is not None:
+                # A visible drop in the bar indicates an automatic restart.
+                if peak is not None and peak >= 2 and value < peak - 1.5:
+                    return True, peak, True
+                peak = max(peak or 0, value)
+        while index < len(sequence) and time.monotonic() - start >= sequence[index]:
+            user32.keybd_event(0x20, 0, 0, 0)
+            try:
+                if cancelled.wait(.05):
+                    return False, None, False
+            finally:
+                user32.keybd_event(0x20, 0, 2, 0)
+            index += 1
+    return True, peak, False
 
 
 class App(tk.Tk):
@@ -118,7 +144,7 @@ class App(tk.Tk):
         ttk.Button(frame, text='Стоп', command=self.cancelled.set).grid(row=6, column=1)
         self.status = tk.StringVar(value='Выберите окно, откройте уровень и запустите попытку.')
         ttk.Label(frame, textvariable=self.status, wraplength=600).grid(row=7, column=0, columnspan=2, sticky='w')
-        ttk.Label(frame, text='После попытки введите процент прогресса из игры. Перед каждой новой попыткой вручную перезапускайте уровень. Одинаковое название сохраняет обучение для уровня.', wraplength=600).grid(row=8, column=0, columnspan=2, sticky='w', pady=15)
+        ttk.Label(frame, text='Бот пробует считать полоску прогресса; после попытки проверьте процент. Перед каждой новой попыткой вручную перезапускайте уровень. Одинаковое название сохраняет обучение для уровня.', wraplength=600).grid(row=8, column=0, columnspan=2, sticky='w', pady=15)
         frame.columnconfigure(0, weight=1)
         self.refresh()
         if sys.platform != 'win32':
@@ -163,14 +189,14 @@ class App(tk.Tk):
         hwnd = self.window_list[index][0]
         def worker():
             try:
-                completed = play(hwnd, self.candidate, duration, self.cancelled)
+                completed, observed, restarted = play(hwnd, self.candidate, duration, self.cancelled)
                 error = None
             except Exception as exc:
-                completed, error = False, str(exc)
-            self.after(0, lambda: self.finished(completed, error))
+                completed, observed, restarted, error = False, None, False, str(exc)
+            self.after(0, lambda: self.finished(completed, error, observed, restarted))
         threading.Thread(target=worker, daemon=True).start()
 
-    def finished(self, completed, error):
+    def finished(self, completed, error, observed, restarted):
         self.running = False
         self.run_button.state(['!disabled'])
         if error:
@@ -179,7 +205,10 @@ class App(tk.Tk):
         if not completed:
             self.status.set('Попытка остановлена; результат не сохранён.')
             return
-        score = simpledialog.askfloat('Результат', 'Какой процент показала игра? (0–100)', minvalue=0, maxvalue=100, parent=self)
+        hint = (f'Оценка по полосе: {observed:.1f}%. ' if observed is not None else 'Полосу не удалось распознать. ')
+        if restarted:
+            hint += 'Обнаружен вероятный перезапуск. '
+        score = simpledialog.askfloat('Результат', hint + 'Проверьте и введите процент из игры (0–100):', initialvalue=round(observed, 1) if observed is not None else None, minvalue=0, maxvalue=100, parent=self)
         if score is None:
             self.status.set('Результат пропущен. Перезапустите уровень для следующей попытки.')
             return
