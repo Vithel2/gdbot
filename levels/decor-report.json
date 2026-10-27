@@ -1,0 +1,17 @@
+{
+  "source_records": 2677,
+  "added": 6310,
+  "total_records": 8987,
+  "categories": {
+    "block_details": 4123,
+    "edge_lights": 722,
+    "silhouette_inlays": 1248,
+    "background": 150,
+    "titles": 2,
+    "color_transitions": 60,
+    "accent_pulses": 5
+  },
+  "original_records_preserved": true,
+  "decorative_no_touch": true,
+  "validated_in_game": false
+}
