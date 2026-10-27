@@ -29,29 +29,56 @@ class Viewer(tk.Tk):
         self.temp_path = None
         self.record_frames = 0
         self.record_hotkey_down = False
-        top = ttk.Frame(self, padding=10)
+        self.refresh_hotkey_down = False
+        header = tk.Frame(self, bg='#111827', padx=18, pady=12)
+        header.pack(fill='x')
+        tk.Label(header, text='GD VIEWER', font=('Segoe UI', 18, 'bold'), bg='#111827', fg='#f8fafc').pack(anchor='w')
+        tk.Label(header, text='Просмотр игры и запись попыток', font=('Segoe UI', 10), bg='#111827', fg='#a5b4cc').pack(anchor='w')
+        top = tk.Frame(self, bg='#111827', padx=18)
         top.pack(fill='x')
-        self.choose = ttk.Combobox(top, state='readonly', width=55)
-        self.choose.pack(side='left', fill='x', expand=True)
-        ttk.Button(top, text='Обновить окна', command=self.refresh).pack(side='left', padx=4)
-        ttk.Button(top, text='Просмотр', command=self.start).pack(side='left', padx=4)
-        ttk.Button(top, text='Запись MP4', command=self.record).pack(side='left', padx=4)
-        ttk.Button(top, text='Остановить запись', command=self.stop_record).pack(side='left', padx=4)
+        self.choose = ttk.Combobox(top, state='readonly', width=45)
+        self.choose.pack(side='left', fill='x', expand=True, ipady=5)
+        def button(label, action, colour):
+            tk.Button(top, text=label, command=action, bg=colour, fg='white',
+                      activebackground='#475569', activeforeground='white', relief='flat',
+                      padx=10, pady=6, font=('Segoe UI', 9, 'bold')).pack(side='left', padx=(6, 0))
+        button('Обновить  X', self.refresh, '#334155')
+        button('Просмотр', self.start, '#2563eb')
+        button('Записать', self.record, '#b91c1c')
+        button('Стоп', self.stop_record, '#334155')
+        button('Папка', self.open_folder, '#334155')
+        tk.Label(self, text='Z — начать / остановить запись     X — обновить окна     Игра должна быть видна на экране',
+                 bg='#111827', fg='#cbd5e1', font=('Segoe UI', 10), pady=10).pack(fill='x')
         self.label = tk.Label(self, bg='#080d17', fg='white', text='Выберите окно игры и нажмите «Просмотр».')
-        self.label.pack(fill='both', expand=True, padx=10, pady=5)
-        self.status = tk.StringVar(value='Выберите окно, включите просмотр. F8 или Ctrl+Shift+R — запись.')
-        tk.Label(self, textvariable=self.status, bg='#111827', fg='#d1d5db', anchor='w', padx=12, pady=8).pack(fill='x')
+        self.label.pack(fill='both', expand=True, padx=18, pady=4)
+        self.status = tk.StringVar(value='Выберите окно и включите просмотр.')
+        tk.Label(self, textvariable=self.status, bg='#111827', fg='#d1d5db', anchor='w', padx=18, pady=5).pack(fill='x')
+        self.message = tk.StringVar(value='Видео по клавише Z сохраняется в Videos/GDTrainer.')
+        tk.Label(self, textvariable=self.message, bg='#111827', fg='#93c5fd', anchor='w', padx=18, pady=5).pack(fill='x')
         self.protocol('WM_DELETE_WINDOW', self.close)
         self.refresh()
         self.after(50, self.check_hotkey)
         if sys.platform != 'win32':
             self.status.set('Захват окна доступен только в Windows.')
 
+    def open_folder(self):
+        try:
+            folder = Path.home() / 'Videos' / 'GDTrainer'
+            folder.mkdir(parents=True, exist_ok=True)
+            os.startfile(folder)
+        except (OSError, AttributeError) as exc:
+            messagebox.showerror('Папка', str(exc))
+
     def refresh(self):
+        previous = self.choose.current()
+        selected = self.items[previous][0] if 0 <= previous < len(self.items) else None
         self.items = windows()
         self.choose['values'] = [f'{title} (окно {hwnd})' for hwnd, title in self.items]
         matches = [i for i, (_, title) in enumerate(self.items) if 'geometry dash' in title.lower()]
-        if matches:
+        old = next((i for i, (hwnd, _) in enumerate(self.items) if hwnd == selected), None)
+        if old is not None:
+            self.choose.current(old)
+        elif matches:
             self.choose.current(matches[0])
         elif self.items:
             self.choose.current(0)
@@ -75,8 +102,22 @@ class Viewer(tk.Tk):
             get_key = ctypes.windll.user32.GetAsyncKeyState
             f8 = bool(get_key(0x77) & 0x8000)
             combo = all(get_key(key) & 0x8000 for key in (0x11, 0x10, 0x52))  # Ctrl+Shift+R
-            down = f8 or combo
-            if down and not self.record_hotkey_down and self.running:
+            z_key = bool(get_key(0x5A) & 0x8000)
+            x_key = bool(get_key(0x58) & 0x8000)
+            foreground = ctypes.windll.user32.GetForegroundWindow
+            foreground.restype = ctypes.c_void_p
+            active = foreground()
+            root = ctypes.windll.user32.GetAncestor
+            root.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+            root.restype = ctypes.c_void_p
+            viewer_root = root(self.winfo_id(), 2)
+            allowed = active in (viewer_root, getattr(self, 'hwnd', None))
+            down = f8 or combo or z_key
+            if x_key and not self.refresh_hotkey_down and allowed:
+                self.refresh()
+                self.message.set('Список окон обновлён. Для другого окна выберите его и нажмите «Просмотр».')
+            self.refresh_hotkey_down = x_key
+            if down and not self.record_hotkey_down and self.running and allowed:
                 if self.writer is not None:
                     self.stop_record()
                 else:
@@ -132,6 +173,7 @@ class Viewer(tk.Tk):
             self.temp_path = temp_path
             self.record_frames = 0
             self.last_write = 0
+            self.message.set('Идёт запись. Нажмите Z, чтобы сохранить видео.')
         except Exception as exc:
             messagebox.showerror('Запись', str(exc))
 
@@ -144,7 +186,7 @@ class Viewer(tk.Tk):
                     os.unlink(self.temp_path)
                     raise RuntimeError('Нет кадров: убедитесь, что игра развёрнута и видна в просмотре.')
                 shutil.move(self.temp_path, self.record_path)
-                self.status.set(f'Запись сохранена ({self.record_frames} кадров): {self.record_path}')
+                self.message.set(f'Сохранено: {self.record_path} ({self.record_frames} кадров)')
             except (OSError, RuntimeError) as exc:
                 messagebox.showerror('Запись', f'{exc}\nВременный файл: {self.temp_path}')
                 self.status.set('Не удалось сохранить запись.')
@@ -174,7 +216,7 @@ class Viewer(tk.Tk):
             display.thumbnail((max(1, self.label.winfo_width()), max(1, self.label.winfo_height())), Image.Resampling.LANCZOS)
             self.photo = ImageTk.PhotoImage(display)
             self.label.configure(image=self.photo, text='')
-            self.status.set(('Запись: ' + self.record_path if self.writer is not None else 'Просмотр (F8 / Ctrl+Shift+R: запись)') + ' | ' + text)
+            self.status.set(('Запись: ' + self.record_path if self.writer is not None else 'Просмотр (Z: запись)') + ' | ' + text)
         except Exception as exc:
             self.running = False
             self.stop_record()
