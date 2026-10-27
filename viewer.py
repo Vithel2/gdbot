@@ -4,6 +4,9 @@ import os
 import shutil
 import tempfile
 import time
+from pathlib import Path
+from datetime import datetime
+from uuid import uuid4
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from PIL import Image, ImageDraw, ImageTk
@@ -25,6 +28,7 @@ class Viewer(tk.Tk):
         self.record_path = None
         self.temp_path = None
         self.record_frames = 0
+        self.f8_down = False
         top = ttk.Frame(self, padding=10)
         top.pack(fill='x')
         self.choose = ttk.Combobox(top, state='readonly', width=55)
@@ -35,10 +39,11 @@ class Viewer(tk.Tk):
         ttk.Button(top, text='Остановить запись', command=self.stop_record).pack(side='left', padx=4)
         self.label = tk.Label(self, bg='#080d17', fg='white', text='Выберите окно игры и нажмите «Просмотр».')
         self.label.pack(fill='both', expand=True, padx=10, pady=5)
-        self.status = tk.StringVar(value='Видео: не записывается')
+        self.status = tk.StringVar(value='Выберите окно, включите просмотр. F8 — начать или остановить запись.')
         tk.Label(self, textvariable=self.status, bg='#111827', fg='#d1d5db', anchor='w', padx=12, pady=8).pack(fill='x')
         self.protocol('WM_DELETE_WINDOW', self.close)
         self.refresh()
+        self.after(50, self.check_hotkey)
         if sys.platform != 'win32':
             self.status.set('Захват окна доступен только в Windows.')
 
@@ -64,7 +69,25 @@ class Viewer(tk.Tk):
             self.running = True
             self.tick()
 
-    def record(self):
+    def check_hotkey(self):
+        if sys.platform == 'win32':
+            import ctypes
+            down = bool(ctypes.windll.user32.GetAsyncKeyState(0x77) & 0x8000)  # F8
+            if down and not self.f8_down and self.running:
+                if self.writer is not None:
+                    self.stop_record()
+                else:
+                    folder = Path.home() / 'Videos' / 'GDTrainer'
+                    try:
+                        folder.mkdir(parents=True, exist_ok=True)
+                        name = datetime.now().strftime('GD_%Y%m%d_%H%M%S_') + uuid4().hex[:6] + '.mp4'
+                        self.record(str(folder / name))
+                    except OSError as exc:
+                        self.status.set('Не удалось создать папку видео: ' + str(exc))
+            self.f8_down = down
+        self.after(50, self.check_hotkey)
+
+    def record(self, path=None):
         if not self.running:
             messagebox.showerror('Запись', 'Сначала включите просмотр.')
             return
@@ -75,7 +98,8 @@ class Viewer(tk.Tk):
         except ImportError:
             messagebox.showerror('Запись', 'Установите библиотеку: py -3.12 -m pip install opencv-python')
             return
-        path = filedialog.asksaveasfilename(defaultextension='.mp4', filetypes=[('MP4 video', '*.mp4')])
+        if path is None:
+            path = filedialog.asksaveasfilename(defaultextension='.mp4', filetypes=[('MP4 video', '*.mp4')])
         if not path:
             return
         try:
@@ -147,7 +171,7 @@ class Viewer(tk.Tk):
             display.thumbnail((max(1, self.label.winfo_width()), max(1, self.label.winfo_height())), Image.Resampling.LANCZOS)
             self.photo = ImageTk.PhotoImage(display)
             self.label.configure(image=self.photo, text='')
-            self.status.set(('Запись: ' + self.record_path if self.writer is not None else 'Просмотр') + ' | ' + text)
+            self.status.set(('Запись: ' + self.record_path if self.writer is not None else 'Просмотр (F8: запись)') + ' | ' + text)
         except Exception as exc:
             self.running = False
             self.stop_record()
