@@ -28,7 +28,7 @@ class Viewer(tk.Tk):
         self.record_path = None
         self.temp_path = None
         self.record_frames = 0
-        self.f8_down = False
+        self.record_hotkey_down = False
         top = ttk.Frame(self, padding=10)
         top.pack(fill='x')
         self.choose = ttk.Combobox(top, state='readonly', width=55)
@@ -39,7 +39,7 @@ class Viewer(tk.Tk):
         ttk.Button(top, text='Остановить запись', command=self.stop_record).pack(side='left', padx=4)
         self.label = tk.Label(self, bg='#080d17', fg='white', text='Выберите окно игры и нажмите «Просмотр».')
         self.label.pack(fill='both', expand=True, padx=10, pady=5)
-        self.status = tk.StringVar(value='Выберите окно, включите просмотр. F8 — начать или остановить запись.')
+        self.status = tk.StringVar(value='Выберите окно, включите просмотр. F8 или Ctrl+Shift+R — запись.')
         tk.Label(self, textvariable=self.status, bg='#111827', fg='#d1d5db', anchor='w', padx=12, pady=8).pack(fill='x')
         self.protocol('WM_DELETE_WINDOW', self.close)
         self.refresh()
@@ -72,8 +72,11 @@ class Viewer(tk.Tk):
     def check_hotkey(self):
         if sys.platform == 'win32':
             import ctypes
-            down = bool(ctypes.windll.user32.GetAsyncKeyState(0x77) & 0x8000)  # F8
-            if down and not self.f8_down and self.running:
+            get_key = ctypes.windll.user32.GetAsyncKeyState
+            f8 = bool(get_key(0x77) & 0x8000)
+            combo = all(get_key(key) & 0x8000 for key in (0x11, 0x10, 0x52))  # Ctrl+Shift+R
+            down = f8 or combo
+            if down and not self.record_hotkey_down and self.running:
                 if self.writer is not None:
                     self.stop_record()
                 else:
@@ -84,7 +87,7 @@ class Viewer(tk.Tk):
                         self.record(str(folder / name))
                     except OSError as exc:
                         self.status.set('Не удалось создать папку видео: ' + str(exc))
-            self.f8_down = down
+            self.record_hotkey_down = down
         self.after(50, self.check_hotkey)
 
     def record(self, path=None):
@@ -171,7 +174,7 @@ class Viewer(tk.Tk):
             display.thumbnail((max(1, self.label.winfo_width()), max(1, self.label.winfo_height())), Image.Resampling.LANCZOS)
             self.photo = ImageTk.PhotoImage(display)
             self.label.configure(image=self.photo, text='')
-            self.status.set(('Запись: ' + self.record_path if self.writer is not None else 'Просмотр (F8: запись)') + ' | ' + text)
+            self.status.set(('Запись: ' + self.record_path if self.writer is not None else 'Просмотр (F8 / Ctrl+Shift+R: запись)') + ' | ' + text)
         except Exception as exc:
             self.running = False
             self.stop_record()
