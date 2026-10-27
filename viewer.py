@@ -218,10 +218,10 @@ class Viewer(tk.Tk):
             self.label.configure(image=self.photo, text='')
             self.status.set(('Запись: ' + self.record_path if self.writer is not None else 'Просмотр (Z: запись)') + ' | ' + text)
         except Exception as exc:
-            self.running = False
-            self.stop_record()
-            self.status.set('Ошибка захвата: ' + str(exc))
-            return
+            if self.writer is not None:
+                self.stop_record()
+            self.status.set('Захват приостановлен: ' + str(exc))
+            self.message.set('Разверните игру. Если была запись, она остановлена и сохранена.')
         self.after(100, self.tick)
 
     def close(self):

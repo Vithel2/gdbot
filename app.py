@@ -16,6 +16,7 @@ if sys.platform == 'win32':
     user32 = ctypes.WinDLL('user32', use_last_error=True)
     user32.IsWindow.argtypes = [wintypes.HWND]
     user32.IsWindowVisible.argtypes = [wintypes.HWND]
+    user32.IsIconic.argtypes = [wintypes.HWND]
     user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
     user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
     user32.SetForegroundWindow.argtypes = [wintypes.HWND]
@@ -63,6 +64,8 @@ def mutate(best, duration):
 
 def capture_client(hwnd):
     from PIL import ImageGrab
+    if not user32.IsWindow(hwnd) or user32.IsIconic(hwnd):
+        raise RuntimeError('Окно игры закрыто или свёрнуто. Разверните его для захвата.')
     rect = wintypes.RECT()
     point = wintypes.POINT(0, 0)
     if not user32.GetClientRect(hwnd, ctypes.byref(rect)) or not user32.ClientToScreen(hwnd, ctypes.byref(point)):
@@ -98,6 +101,8 @@ def play(hwnd, sequence, duration, cancelled, reactive, resume):
         if now >= next_capture:
             frame = capture_client(hwnd)
             value = progress_percent(frame)
+            if value is not None and peak is not None and peak >= 2 and value < peak - 1.5:
+                return True, peak, True
             if reactive and now - last_jump > .45 and obstacle_ahead(frame):
                 user32.keybd_event(0x20, 0, 0, 0)
                 try:
@@ -106,11 +111,8 @@ def play(hwnd, sequence, duration, cancelled, reactive, resume):
                 finally:
                     user32.keybd_event(0x20, 0, 2, 0)
                 last_jump = time.monotonic()
-            next_capture = time.monotonic() + .08
+            next_capture = time.monotonic() + .03
             if value is not None:
-                # A visible drop in the bar indicates an automatic restart.
-                if peak is not None and peak >= 2 and value < peak - 1.5:
-                    return True, peak, True
                 peak = max(peak or 0, value)
         while not reactive and index < len(sequence) and time.monotonic() - start >= sequence[index]:
             user32.keybd_event(0x20, 0, 0, 0)
