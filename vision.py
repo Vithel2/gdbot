@@ -32,3 +32,27 @@ def progress_percent(image):
             break
         end = x
     return max(0., min(100., 100 * (end - left + 1) / (right - left)))
+
+
+def obstacle_ahead(image):
+    """Experimental bright-outline detector for a cube near the ground.
+
+    Assumes the standard camera and brightly outlined obstacles. Returns a
+    heuristic, not an object classifier; it may trigger on decorations.
+    """
+    image = image.convert('RGB')
+    w, h = image.size
+    if w < 300 or h < 150:
+        return False
+    pixels = image.load()
+    # In the reference image the cube is around x=.37, the ground at y=.72.
+    # Ignore the ground itself and look for clusters directly ahead of it.
+    count = 0
+    for y in range(int(h * .62), int(h * .715), 2):
+        for x in range(int(w * .42), int(w * .54), 2):
+            r, g, b = pixels[x, y]
+            if min(r, g, b) > 195:
+                count += 1
+                if count >= 5:
+                    return True
+    return False

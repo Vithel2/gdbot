@@ -8,7 +8,7 @@ import time
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 from pathlib import Path
-from vision import progress_percent
+from vision import progress_percent, obstacle_ahead
 
 if sys.platform == 'win32':
     import ctypes
@@ -70,13 +70,22 @@ def capture_client(hwnd):
     return ImageGrab.grab(bbox=(point.x, point.y, point.x + rect.right, point.y + rect.bottom), all_screens=True)
 
 
-def play(hwnd, sequence, duration, cancelled):
+def play(hwnd, sequence, duration, cancelled, reactive, resume):
     if not user32.IsWindow(hwnd) or not user32.SetForegroundWindow(hwnd):
         raise RuntimeError('Не удалось активировать выбранное окно. Откройте игру и выберите её заново.')
     time.sleep(.3)
     if user32.GetForegroundWindow() != hwnd:
         raise RuntimeError('Окно игры не получило фокус. Попробуйте ещё раз.')
+    if resume:
+        # The game must already be paused; do not send a pause key elsewhere.
+        user32.keybd_event(0x20, 0, 0, 0)
+        try:
+            if cancelled.wait(.05):
+                return False, None, False
+        finally:
+            user32.keybd_event(0x20, 0, 2, 0)
     start = time.monotonic()
+    last_jump = start - 1
     next_capture = start
     peak = None
     index = 0
@@ -87,14 +96,23 @@ def play(hwnd, sequence, duration, cancelled):
             raise RuntimeError('Окно игры потеряло фокус; попытка остановлена.')
         now = time.monotonic()
         if now >= next_capture:
-            value = progress_percent(capture_client(hwnd))
+            frame = capture_client(hwnd)
+            value = progress_percent(frame)
+            if reactive and now - last_jump > .45 and obstacle_ahead(frame):
+                user32.keybd_event(0x20, 0, 0, 0)
+                try:
+                    if cancelled.wait(.05):
+                        return False, None, False
+                finally:
+                    user32.keybd_event(0x20, 0, 2, 0)
+                last_jump = time.monotonic()
             next_capture = time.monotonic() + .08
             if value is not None:
                 # A visible drop in the bar indicates an automatic restart.
                 if peak is not None and peak >= 2 and value < peak - 1.5:
                     return True, peak, True
                 peak = max(peak or 0, value)
-        while index < len(sequence) and time.monotonic() - start >= sequence[index]:
+        while not reactive and index < len(sequence) and time.monotonic() - start >= sequence[index]:
             user32.keybd_event(0x20, 0, 0, 0)
             try:
                 if cancelled.wait(.05):
@@ -109,7 +127,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title('GD Trainer')
-        self.geometry('650x410')
+        self.geometry('650x480')
         self.resizable(False, False)
         self.protocol('WM_DELETE_WINDOW', self.close)
         self.cancelled = threading.Event()
@@ -137,14 +155,18 @@ class App(tk.Tk):
         self.level.grid(row=3, column=0, sticky='ew')
         ttk.Label(frame, text='Длительность попытки, секунд (1–300):').grid(row=4, column=0, sticky='w', pady=(10, 0))
         self.duration = ttk.Entry(frame)
-        self.duration.insert(0, '30')
+        self.duration.insert(0, '120')
         self.duration.grid(row=5, column=0, sticky='ew')
+        self.reactive = tk.BooleanVar(value=True)
+        self.resume = tk.BooleanVar(value=True)
+        ttk.Checkbutton(frame, text='Реагировать на яркие препятствия (эксперимент)', variable=self.reactive).grid(row=6, column=0, sticky='w')
+        ttk.Checkbutton(frame, text='Уровень на паузе: нажать пробел для продолжения', variable=self.resume).grid(row=7, column=0, sticky='w')
         self.run_button = ttk.Button(frame, text='Запустить попытку', command=self.run_attempt)
-        self.run_button.grid(row=6, column=0, sticky='w', pady=12)
-        ttk.Button(frame, text='Стоп', command=self.cancelled.set).grid(row=6, column=1)
+        self.run_button.grid(row=8, column=0, sticky='w', pady=12)
+        ttk.Button(frame, text='Стоп', command=self.cancelled.set).grid(row=8, column=1)
         self.status = tk.StringVar(value='Выберите окно, откройте уровень и запустите попытку.')
-        ttk.Label(frame, textvariable=self.status, wraplength=600).grid(row=7, column=0, columnspan=2, sticky='w')
-        ttk.Label(frame, text='Бот пробует считать полоску прогресса; после попытки проверьте процент. Перед каждой новой попыткой вручную перезапускайте уровень. Одинаковое название сохраняет обучение для уровня.', wraplength=600).grid(row=8, column=0, columnspan=2, sticky='w', pady=15)
+        ttk.Label(frame, textvariable=self.status, wraplength=600).grid(row=9, column=0, columnspan=2, sticky='w')
+        ttk.Label(frame, text='Бот пробует считать полоску прогресса; после попытки проверьте процент. Перед каждой новой попыткой вручную перезапускайте уровень. Одинаковое название сохраняет обучение для уровня.', wraplength=600).grid(row=10, column=0, columnspan=2, sticky='w', pady=15)
         frame.columnconfigure(0, weight=1)
         self.refresh()
         if sys.platform != 'win32':
@@ -177,9 +199,7 @@ class App(tk.Tk):
             messagebox.showerror('Проверьте настройки', str(exc))
             return
         profile = self.profiles.get(name, {})
-        if profile and profile.get('duration') != duration:
-            messagebox.showerror('Другая длительность', 'Для существующего профиля используйте прежнюю длительность или другое название уровня.')
-            return
+        reactive, resume = self.reactive.get(), self.resume.get()
         self.candidate = mutate(profile.get('best'), duration)
         self.attempt_profile = (name, duration)
         self.cancelled.clear()
@@ -189,14 +209,14 @@ class App(tk.Tk):
         hwnd = self.window_list[index][0]
         def worker():
             try:
-                completed, observed, restarted = play(hwnd, self.candidate, duration, self.cancelled)
+                completed, observed, restarted = play(hwnd, self.candidate, duration, self.cancelled, reactive, resume)
                 error = None
             except Exception as exc:
                 completed, observed, restarted, error = False, None, False, str(exc)
-            self.after(0, lambda: self.finished(completed, error, observed, restarted))
+            self.after(0, lambda: self.finished(completed, error, observed, restarted, reactive))
         threading.Thread(target=worker, daemon=True).start()
 
-    def finished(self, completed, error, observed, restarted):
+    def finished(self, completed, error, observed, restarted, reactive):
         self.running = False
         self.run_button.state(['!disabled'])
         if error:
@@ -212,8 +232,12 @@ class App(tk.Tk):
         if score is None:
             self.status.set('Результат пропущен. Перезапустите уровень для следующей попытки.')
             return
+        if reactive:
+            self.status.set(f'Результат: {score}%. Режим анализа не сохраняет последовательность прыжков.')
+            return
         name, duration = self.attempt_profile
         profile = self.profiles.setdefault(name, {'duration': duration, 'score': -1, 'best': None, 'attempts': 0})
+        profile['duration'] = duration
         profile['attempts'] += 1
         if score > profile['score']:
             profile['score'], profile['best'] = score, self.candidate
